@@ -1,0 +1,665 @@
+---
+title: "Coding Sample"
+author: 'Urvi Gaur'
+output: html
+self-contained: true
+---
+
+The objective of the assignment below is to explore ideas like clustering, anomaly detection, and dimensionality reduction. It also attempts to analyze text-based data and makes use of text mining techniques.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+#Packages used
+library(ggplot2)
+library(dplyr)     
+library(tidyr)     
+library(readr)     
+library(forcats)
+library(stringr)
+library(reshape2)
+library(dbscan)
+library(cluster)
+library(factoextra)
+library(stats)
+library(rsample)
+library(yardstick) 
+library(parsnip)   
+library(workflows) 
+library(rpart)
+library(purrr)
+library(recipes)
+library(broom)
+library(quanteda)
+library(janitor)
+library(plotly)
+library(NbClust)
+library(topicmodels)
+library(quanteda)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(quanteda.textmodels)
+library(wordcloud)
+library(ggsci)  
+library(syuzhet)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Download the zipped file
+download.file("https://github.com/rudeboybert/JSE_OkCupid/raw/master/profiles_revised.csv.zip",
+              dest="profiles_revised.csv.zip")
+
+# Unzip it so we can use a profiles_revised.csv file
+unzip("profiles_revised.csv.zip")
+
+data <- read_csv("profiles_revised.csv")
+```
+
+#### **The Data (an overview):**
+
+Here I try to provide an overview of the dataset and important points from the paper ["OkCupid Data for Introductory Statistics and Data Science Courses"](https://doi.org/10.1080/10691898.2015.11889737). I provide this initial summary to help me work through the rest of the summative and develop and initial understanding of the structure of the data I am working with.
+
+1.  Data set consists of user profile data for 59, 946 San Francisco OkCupid users
+2.  The data set includes typical user information, lifestyle variables, and text responses to 10 essay questions
+3.  Random noise was added to age variable for de-identification purposes
+4.  The essay data has been randomized by rows to decouple them from the profiles data i.e. the user represented in the first row of profiles_revised does not necessarily correspond to the user that wrote the responses in the first row of essays_revised_and_shuffled
+
+#### Pre-processing the data
+
+We are interested in understanding the user profiled of OkCupid, focusing on specific variables:
+
+Demographic variables:\
+1. Sex\
+2. Orientation\
+3. Status\
+4. Age\
+5. Height
+
+Attitudinal variables:\
+1. Drinks\
+2. Smokes\
+3. Drugs
+
+```{r}
+# Define factor levels
+status_levels <- c("not_informed", "single", "available", "seeing someone", "married")
+drinks_levels <- c("not_informed", "not_at_all", "rarely", "socially", "often", "very_often", "desperately")
+smokes_levels <- c("not_informed", "no", "sometimes", "when drinking", "yes", "trying to quit")
+drugs_levels <- c("not_informed", "never", "sometimes", "often")
+
+# Convert columns to ordered factors
+data$status <- factor(data$status, levels = status_levels, ordered = TRUE)
+data$drinks <- factor(data$drinks, levels = drinks_levels, ordered = TRUE)
+data$smokes <- factor(data$smokes, levels = smokes_levels, ordered = TRUE)
+data$drugs <- factor(data$drugs, levels = drugs_levels, ordered = TRUE)
+# Convert NAs to 1
+data$drugs <- ifelse(is.na(data$drugs), 1, data$drugs)
+
+
+# Convert factors to numeric
+data$status <- as.numeric(data$status)
+data$drinks <- as.numeric(data$drinks)
+data$smokes <- as.numeric(data$smokes)
+data$drugs <- as.numeric(data$drugs)
+
+data <- data[c('sex', 'orientation', 'status', 'age', 'height', 'drinks', 'smokes', 'drugs')]
+
+head(data)
+```
+
+------------------------------------------------------------------------
+
+#### PART1: Clustering and PCA
+
+To identify groups of users with similar profiles, we create the recipe below before applying any clustering algorithm.
+
+```{r}
+base_recipe <-
+  recipe(~., data = data) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_factor_predictors()) %>%
+  prep()
+
+base_recipe_results = bake(base_recipe, data)
+base_recipe_results %>%
+  head()
+```
+
+***Question1: Describe the recipe outlined above. What is the purpose of each step? Is there anything you modify?***
+
+The recipe above leads to a series of transformations to prepare our data for further analysis (or clustering in particular). It normalizes all numeric variables in the data-set i.e. scales them to have a mean of zero and standard deviation of one. This will help us with future clustering to ensure that all numeric variables are on the same scale and contribute equally to the calculations. The recipe also converts all categorical variables into dummy variables. This is essential for the clustering algorithms requiring numeric input.\
+\
+*Based on the data-set and the above recipe, here are a few suggested modifications:*\
+1. *Conduct exploratory data analysis* to understand variable distributions, identify outliers, and detect any anomalies.\
+2. Given the above recipe, it might be help to *add a step for dimensionality reduction*. We consider there because when dummy encoding, each level of categorical variable is transformed into a new binary variable. This would lead to a significant increase in the number of features in a data-set.
+
+[Below I have tried to provide some codes and my intuition behind them]{.underline}:\
+I first try to conduct EDA. I plot a historagm for age and a boxplot for height, to elaborate more on their distribution. Given the categorical nature of the variables Sex, Orientation, Status, Drinks, Smokes, and Drugs - I plotted bar plots for each to understand the frequency distribution of each categorical value.
+
+```{r, warning=FALSE}
+# Histogram for Age
+ggplot(data, aes(x = age)) + 
+  geom_histogram(binwidth = 1, fill = "blue", color = "black") +
+  theme_minimal() +
+  ggtitle("Distribution of Age")
+
+# Boxplot for Height
+ggplot(data, aes(y = height)) + 
+  geom_boxplot(fill = "orange", color = "black") +
+  theme_minimal() +
+  ggtitle("Boxplot of Height")
+
+# Function to create a bar plot for a given variable
+create_bar_plot <- function(data, variable, fill_color, title) {
+  ggplot(data, aes_string(x = variable)) + 
+    geom_bar(fill = fill_color, color = "black") +
+    theme_minimal() +
+    ggtitle(title)
+}
+
+# Now you can call this function for each variable
+create_bar_plot(data, "sex", "lightblue", "Bar Plot of Sex")
+create_bar_plot(data, "orientation", "lightgreen", "Bar Plot of Orientation")
+create_bar_plot(data, "status", "lightpink", "Bar Plot of Status")
+create_bar_plot(data, "drinks", "lavender", "Bar Plot of Drinks")
+create_bar_plot(data, "smokes", "yellow", "Bar Plot of Smokes")
+create_bar_plot(data, "drugs", "grey", "Bar Plot of Drugs")
+```
+
+From the above outcome, two aspects I might want to adjust for in my recipe could be\
+a. The histogram of age shows right-skewed distribution; applying a transformation to make this feature more normally distributed might help\
+b. The boxplot for height reveals several outliers, particularly on the lower end (reflecting a rather young demographic); adding a step to remove or transform these will help reduce their impact
+
+```{r}
+#Defining a new recipe considering EDA findings and including PCA
+updated_recipe <- recipe(~., data = data) %>%
+  step_log(all_of('age'), base = 10) %>% #accounting for skewness of age
+  step_YeoJohnson(all_of('height')) %>% #accounting for outliers
+  step_impute_median(all_numeric_predictors()) %>% #imputing missing values for all numeric predictors
+  step_naomit(all_predictors()) %>% #removing rows with NA values
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_pca(all_predictors(), threshold = 0.95) %>%
+  prep()
+
+# apply the recipe to our data set
+pca_results_updated = bake(updated_recipe, data)
+pca_results_updated %>%
+  head()
+```
+
+***Question2: If you decided to apply k-means clustering to the data after using this 'recipe', how would you go about choosing the number of cluster? Please explain your reasoning.***
+
+To apply k-means clustering to the data, there is no one obvious answer to the question of how many clusters is correct. As explained in the labs, this is analogous to making "predictions", whereas "fitting" the model is the process of finding the centroids itself.\
+I would start by perfoming k-means clustering for a range of values of k and then would employ the elbow method to recognize the best 'fit' of k given my recipe and my dataset. The Elbow Method involved putting the within-cluster sum of squares (WCSS) against the number of clusters (k) and looking for a point where the rate of decrease sharply changes, suggesting diminishing returns on the explanatory power of additional clusters. This "elbow" typically indicates a good balance between the number of clusters and the compactness of the clusters.
+
+[Below I have tried to provide some codes and my intuition behind them]{.underline}:\
+I first perform dimensionality reduction using PCA (for reasons mentioned in the previous answer). I have also added steps to the recipe to remove variables with more than 5% missing values and drop rows with with missing values (I was also unable to run the recipe and perform PCA without adding the additional steps of filtering out rows that a significant number of missing values and removing rows that contains any missing values in all numeric predictor columns).
+
+```{r}
+#performing PCA on the base recipe
+pca_recipe = 
+  recipe(~., data = data) %>%
+  step_filter_missing(all_numeric_predictors(), threshold=0.05) %>%
+  step_naomit(all_numeric_predictors(), skip=FALSE) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_factor_predictors()) %>%
+  step_pca(all_numeric_predictors()) %>%
+  prep
+
+# apply the recipe to our data set
+pca_results = bake(pca_recipe, data)
+pca_results %>%
+  head()
+
+#plotting the two principle components 
+ggplot(pca_results, aes(PC1, PC2)) +
+  geom_point(alpha=0.3) +
+  ggtitle("Principal Components", subtitle = "2-dimensional representation of our predictors")
+```
+
+To understand how many clusters to choose to apply k-means clustering to, I first experiment with three clusters and visualize how to analyze it.
+
+```{r}
+#run k-means clustering on our two principal components. We'll just go with 3 clusters for now
+kclust = 
+  pca_results %>%
+  select(PC1, PC2) %>%
+  kmeans(centers = 3)
+
+tidy(kclust)
+
+#Visualizing it 
+augment(kclust, pca_results) %>%
+  ggplot() +
+  geom_point(aes(x=PC1, y=PC2, color=.cluster), alpha=0.3) +
+  geom_point(data = tidy(kclust), aes(x=PC1, y=PC2), size = 6, shape = "x")
+```
+
+Given the above plot of PC1 against PC2, the clusters appear to be fairly well-defines and mostly non-overlapping suggesting that three clusters do a good job of capturing significant values in the data.
+
+Further, based on what we learned in lab, I tried to perform k-mean clustering for various k and then eventually visualize it using a facet plot.
+
+```{r}
+# this is a very compact way to perform k-means clustering for various k
+kclusts <- 
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~kmeans(select(pca_results, PC1, PC2), .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, pca_results)
+  )
+```
+
+```{r}
+clusters <- 
+  kclusts %>%
+  unnest(cols = c(tidied))
+
+assignments <- 
+  kclusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings <- 
+  kclusts %>%
+  unnest(cols = c(glanced))
+```
+
+```{r}
+ggplot(assignments, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = .cluster), alpha = 0.7) + 
+  facet_wrap(~ k) +
+  geom_point(data = clusters, size = 4, shape = "x")
+```
+
+```{r}
+ggplot(clusterings, aes(k, tot.withinss)) +
+  geom_line() +
+  geom_point()
+```
+
+This facet plot allows me to make use of the elbow method of predicting what is the most appropriate number of clusters to perform k-means clustering for. Given the plot above, it seems that there is not one particular elbow that stands out. However, the curve seems to be flattening somewhere before k = 5.
+
+Based on all the above context and outcome, I would choose ***four** clusters to apply k-means clustering to the data-set*.
+
+***Question3: How would you determine what each cluster means? In other words, how would you go about describing the most typical user profile within each cluster? Please provide an explanation for you approach.***
+
+Given that I chose four clusters to apply k-means clustering to the dataset, I will first perform the clustering to be able to visualize and explain the plots in much more detail.
+
+To determine what each cluster represents and to describe the most typical user profile within each cluster based on the PCA results and k-means clustering, here are a few steps I would follow:
+
+1.  Understand the PCA Components:
+    -   Identify what original variables most strongly influence PC1 and PC2
+
+    -   The direction and magnitude of the coefficients of the linear combinations for each original variable on PC1 and PC2 will explain how those variables contribute to the component
+2.  Review Cluster Centers:
+    -   Each cluster center is represented by its centroid in the space defined by PC1 and PC2
+
+    -   By examining the coordinates of each centroid, I would get an idea of what combination of the original variables are common within that cluster
+3.  Interpret Each Cluster:
+    -   A centroid with high value on PC1 but a low value on PC2 would indicate a profile that scores high on the variables that PC1 represents but low on what PC2 represents, and vice versa
+4.  Profile of Typical User:
+    -   To profile the typical user in each cluster, I would examine the data points that fall into each cluster. Look for common traits or behaviors among these users.
+
+    -   It would also help to calculate the mean or median of the original variables for the data points within each cluster to get a profile of the typical user
+
+[Below I have tried to provide some codes and my intuition behind them]{.underline}:
+
+```{r}
+#k = 4 
+kclust = 
+  pca_results %>%
+  select(PC1, PC2) %>%
+  kmeans(centers = 4)
+
+# Tidy the k-means result to get a dataframe of cluster centers
+cluster_centers <- tidy(kclust)
+print(cluster_centers)
+
+#Visualizing it 
+augment(kclust, pca_results) %>%
+  ggplot() +
+  geom_point(aes(x=PC1, y=PC2, color=.cluster), alpha=0.3) +
+  geom_point(data = tidy(kclust), aes(x=PC1, y=PC2), size = 6, shape = "x")
+```
+
+```{r}
+pca_step <- pca_recipe %>% tidy() %>% filter(type == "pca") %>% pull(number)
+
+tidied_pca <- tidy(pca_recipe, pca_step)
+
+plot_df <- 
+  tidied_pca %>%
+  filter(component %in% paste0("PC", 1:5)) %>%
+  arrange(desc(abs(value))) %>% 
+  group_by(component) %>% 
+  # Get 10 biggest contributors to this PC
+  slice_head(n=10) %>%
+  mutate(component = fct_inorder(component))
+
+terms_levels <- 
+  plot_df %>% 
+  group_by(terms) %>% 
+  summarise(sum_value=sum(abs(value))) %>% 
+  arrange(sum_value) %>% 
+  pull(terms)
+
+plot_df$terms <- factor(plot_df$terms, levels=terms_levels)
+
+ggplot(plot_df, aes(value, terms, fill = abs(value))) +
+  geom_col() +
+  
+  scale_fill_viridis_c(name="Abs value") +
+  
+  facet_wrap(~component, nrow = 1) +
+  labs(title="Which variables contributed the most (together) to a particular PC?",
+       captions="Contribution of most important\n features to each component",
+       y = NULL) +
+  # Prettify plot a bit
+  theme_bw() +
+  theme(plot.title=element_text(size=rel(1.2)),
+        plot.subtitle = element_text(size=rel(1)),
+        axis.title=element_text(size=rel(1.3)),
+        axis.title.x=element_text(margin=margin(t=10)),
+        axis.title.y=element_text(margin=margin(r=10)),
+        axis.text.y=element_text(size=rel(1.25)))
+```
+
+Based on the clusters and the contribution of most important features to each component, here's how each cluster could be described:
+
+-   Cluster 1 (Red): Users in this clusters have negative values on both PC1 and PC2, which might suggest they score below average on the traits represented by both components. Since PC1 is heavily influence by "orientation_straight" and "sex_m" and PC2 is influences by "orientation_gay" and "height", this cluster might consist of individuals who are less likely to be straight and male, and are less likely to be gay and tall. This could represent individuals who are possibly female and of average height, not strongly identifying with either of the orientations specified.
+
+-   Cluster 2 (Blue): User's in this cluster score below average on PC1's traits but above average on PC2's traits. Considering the loadings, these might be individuals who are more likely to be gay and taller, and less likely to be straight and male.
+
+-   Cluster 3 (Green): This is the largest cluster with a significantly negative value on PC1 and an average value on PC2. Given the loadings, these users are likely to be less associated with being straight and male but do not have a strong associating with the traits defining PC2.
+
+-   Cluster 4 (Purple): Users have slightly negative values for both PC1 and PC2. This might represent individuals who are slightly less likely to be straight and male according to PC1 and also slightly less likely to be gay and tall according to PC2.
+
+{I do believe that these outcomes regarding most important features to principal components are contradictory to what was discussed in lab, which probably arose from some error in my coding steps. However, explaining the differences in outcomes lies beyond the scope of this assignment.}
+
+***Question4: Now suppose you added an extra step to the base_recipe, to calculate the principal components of the data:***
+
+```{r}
+pca_recipe <- base_recipe %>%
+  step_filter_missing(all_numeric_predictors(), threshold=0.05) %>%
+  step_naomit(all_numeric_predictors(), skip=FALSE) %>%
+  step_pca(all_predictors(), num_comp = Inf, keep_original_cols=TRUE) %>%     
+  prep()
+```
+
+***If you plot the cumulative proportion of variance explained by each principal component, you will see the following:***
+
+![](images/clipboard-2449492681.png)
+
+![]()
+
+***Why are there 9 principal components?***
+
+-   When applying Principal Component Analysis after dummy encoding cateogrical variables, the number of principal components we should end up with is equal to the number of numeric predictors we have after encoding.
+-   The 'num_comp = Inf' argument in 'step_pca()' specifies that we wish to retain all principal components, upto the maximum number possible. We can acquire the number of maximum principal components using the code given below. The chunk below prepares and bakes our recipe and then checks the numbers of columns in the baked data i.e. the number of predictors in the baked data.
+-   To understand this, we can look at the columns in the baked_data. The variables 'status', 'age', 'height', 'drinks', 'smokes', and 'drugs' are all numeric variables and therefore are accounted for only once. For the remaining two categorical variables, 'sex' and 'orientation', each level except for one (the reference level) becomes its own binary numeric variable after dummy encoding. That is:\
+    -   For sex, a categorical variable with two levels, we get one binary variable i.e. sex_m\
+    -   For orientation, a categorical variable with three levels, we get two binary variables i.e. orientation_gay and orientation_straight
+-   In conclusion, we get\
+    6 (numeric variables) + 1 (one binary variable for sex) + 2 (two binary variables for orientation) = 9
+
+```{r, warning=FALSE}
+# Prepare and bake the recipe
+prepared_recipe <- prep(base_recipe, training = data)
+baked_data <- bake(prepared_recipe, new_data = NULL)
+
+baked_data <- na.omit(baked_data)
+
+# Check the number of columns in the baked data, which equals the number of numeric predictors
+num_predictors <- ncol(baked_data)
+
+# Print the number of predictors
+print(num_predictors)
+print(colnames(baked_data))
+```
+
+***If you were to use k-means clustering on the data now, how many principal components would you consider using? Give reasons for your choice.***
+
+If I were to use k-means clustering on the data now, I would choose to use *four* principal components.
+
+The decision of how many principal components to use when applying k-means clustering to PCA-transformed data is a balance between retaining enough variance to meaningfully represent the data and reducing dimentionality to simplify the model and potentially improve clustering performance. A few factors to influence my answer are:
+
+-   [Variance Threshold:]{.underline} Looking at the cumulative variance explained by the principal components, choosing enough components to explain a substantial proportion of the variance will help me ensure that the reduced data-set still captured most of the information from the original data. According to the above plot, I could choose to use four principal components as beyond that the marginal impact of individual PC reduces significantly.
+
+-   [Simplicity vs. Information:]{.underline} Fewer components can lead to a simpler, more generalized clustering model but might miss some nuances in the data. Too many components might model noise, leading to less meaningful clusters.
+
+-   [Scree Plot:]{.underline} A plot of the variance explained by each component to identify an "elbow" where the marginal gain in explained variance diminishes significantly. Plotting a scree plot will also give insights and reaffirm the findings from variance threshold. (I was unable to plot a scree plot and kept running into errors but wanted to mention this as one of the methods of understanding the appropriate number of principal clusters)
+
+***How would you change the approach to interpreting the clusters? Would you still use the same method you proposed in Question 3? Why or why not?***
+
+One approach I would take to understanding and interpreting the clusters would be to focus on understanding the characteristics of each cluster.
+
+-   [Component Loadings]{.underline}: Loadings are coefficients that describe how each original variables contributes to the principal component. I would begin by examining the loadings of the principal components, this would help me understand what each principal component represents in terms of original variables.
+
+-   [Interpretation of Components]{.underline}: It would then help to identify which original variables are most strongly associated with each of the four principal components.
+
+-   [Characteristic Features]{.underline}: Based on the centroids' positions on the principal components, it would be insightful to describe the typical characteristics of each cluster. Comparing the centroids of different clusters to understand how they are distinct from each other would also help.
+
+This approach is pretty similar to the one I took to answer question 3. This is because the approach provides a detailed understanding in terms of the underlying data structure revealed by PCA. Understanding loadings is crucial because principal components are linear combinations of the original variables and high absolute values in loadings show which variables most strongly influence each principal component.
+
+[Below I have tried to provide some codes and my intuition behind them]{.underline}:
+
+```{r}
+# Run PCA on the data
+pca_result <- prcomp(baked_data, center = TRUE, scale. = TRUE)
+
+# Extract the loadings
+loadings <- pca_result$rotation
+
+# Convert the loadings matrix to a data frame and reset the row names
+loadings_df <- as.data.frame(loadings)
+loadings_df$Variable <- rownames(loadings_df)
+
+# Convert the data frame to a long format suitable for ggplot
+long_loadings <- melt(loadings_df, id.vars = "Variable")
+```
+
+In the below received heatmap, the colours represent the magnitude and direction of the loadings i.e. red indicated positive loading, blue indicated negative loading, and white indicates a loading close to zero.\
+Each row corresponds to one of the original variables in the dataset, while each column represents one of the principal components.\
+The strength of the color indicates the magnitude of the loading. Darker colors (both red and blue) suggest that the original variable has a strong influence on the principal component.
+
+This heatmap is a useful tool for quickly visualizing the relationships between the original variables and principal components.
+
+```{r}
+# Plotting the heatmap
+ggplot(long_loadings, aes(x = variable, y = Variable, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(x = "Principal Component", y = "Original Variable", fill = "Loading") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+#### PART2: Text Mining
+
+***On top of the numeric and categorical variables, the dataset also contains 'essays' written by the users in their profiles. These essays are text answers to the following questions asked by OkCupid:***
+
+-   `essay0` ***: My self summary***
+
+-   `essay1` ***: What I'm doing with my life***
+
+-   `essay2` ***: I'm really good at***
+
+-   `essay3` ***: The first thing people usually notice about me***
+
+-   `essay4` ***: Favorite books, movies, show, music, and food***
+
+-   `essay5` ***:*** ***The six things I could never do without***
+
+-   `essay6` ***: I spend a lot of time thinking about***
+
+-   `essay7` ***: On a typical Friday night I am***
+
+-   `essay8` ***: The most private thing I am willing to admit***
+
+-   `essay9` ***: You should message me if...***
+
+***How would you go about analyzing the text data? What would you do first?***
+
+```{r, message=FALSE}
+
+essays_df <- read_csv("essays_revised_and_shuffled.csv")
+```
+
+To analyze the text data, here are the steps I would take:
+
+1.  [Initial-data exploration]{.underline}: This steps would help me understand the basic structure of the data and then delve deeper according to pre-processing it. Through this process I will be able to visualize what the columns look like, if there are any missing values, etc. This also an initial step because the basic structure of the data-set would influence exactly how to analyze it as well.
+
+```{r}
+dim(essays_df)
+head(essays_df)
+summary(essays_df)
+```
+
+2.  [Data Pre-processing]{.underline}: This would be a crucial step to perform all the initial manipulations and transform raw data into a more analyzable form
+    -   Corpus creation: First step would be to create a corpus i.e. a collection of text documents that serves as the basic input for text analysis. This would be a structured and standardized way to store text data, making it easier to apply various algorithms.
+
+    -   Tokenization: This process breaks the text into smaller units laying down the foundation of further processing.
+
+    -   Removing Punctuation, Symbols, Numbers, Split Hyphenated Words, Stopwords: Cleaning the text reduced noise and focuses on the meaningful context of the text. This step is crucial for getting accurate insights from the text and for reducing the dimensionality of the data.
+
+```{r}
+#Creating a combined essay column 
+essays_df <- essays_df %>%
+  unite("combined_essay", essay0, essay1, essay2, essay3, essay4, essay5, essay6, essay7, essay8, essay9, sep = " ", na.rm = TRUE)
+```
+
+```{r}
+# Create a corpus from the combined essays
+corp_essays <- corpus(essays_df, text_field = "combined_essay")
+
+tokens_essays <- 
+  quanteda::tokens(corp_essays) %>%                           #Tokenisation
+  quanteda::tokens(remove_punct = T,                       #punctuation
+                   remove_symbols = T,                     #symbols eg £$
+                   remove_numbers = T,                     #numbers 
+                   remove_url = T,                         #urls 
+                   split_hyphens = T) %>%                  #splitting hyphenated #words up
+  quanteda::tokens_remove(pattern = quanteda::stopwords("en")) %>%
+  quanteda::tokens_remove(pattern = "br|href|ilink") 
+```
+
+3.  [Create a Document-Feature Matrix (DFM)]{.underline}: DFM is a fundamental concept in text analysis, partiularly when working with large collections of text data. It's a structured way of representation text data where each row represents a document and each column represents a feature. The entries in the matrix usually represent the frequency of each word in each document. This is a necessary step because it quantifies text data (enabling various computational methods that require numeric input). extracts features from text (which can be used for exploratory data analysis, clustering, classification, and other advanced text mining techniques), turns the data into a manageable form.
+
+```{r}
+# Create a document-feature matrix
+dfm_essays <- dfm(tokens_essays)
+
+head(dfm_essays)
+```
+
+4.  [Exploratory Data Analysis (EDA)]{.underline}: Performing EDA on the data will help us understand the basic structure of the text data, such as common themes, word frequencies, and the distribution of text lengths. It might also reveal issues that need to be addressed, such as irrelevant words, outliers, or data inconsistencies.
+    -   Frequency Analysis: This would help identify the most common words or phrases in the text which can be indicative of the main themes or topics. High-frequency terms may reveal redundant or irrelevant words that need further cleaning as well.
+
+    -   Bar Plot for Top Terms: Bar plots provide a clear visual representation of the frequency of the top terms making it more intuitive than just looking at a list. This allows for easy comparison between the frequencies of different terms.
+
+    -   Sentiment Analysis: Sentiment analysis categorizes the text into sentiments like positive, negative, neutral. This would help us understand the emotional tone of the content.
+
+    -   Text length Analysis: Analyzing the length of text documents can reveal if certain documents are more detailed or verbose compared to others.
+
+Each of these techniques would bring out unique insights into the structure and characteristics of the text data, enabling a more comprehensive understanding.
+
+```{r}
+#Frequency analysis
+top_terms <- topfeatures(dfm_essays, 10)
+print(top_terms)
+
+#Bar plots for top terms
+freq_data <- data.frame(term = names(top_terms), freq = top_terms)
+ggplot(freq_data, aes(x = term, y = freq)) + geom_bar(stat = "identity")
+
+#sentiment analysis 
+sentiments <- get_sentiment(essays_df$combined_essay, method = "syuzhet")
+summary(sentiments)
+
+#Text length analysis 
+text_lengths <- ntoken(corp_essays)
+summary(text_lengths)
+```
+
+***What interesting research questions would you pose to the data? Why?***
+
+Given the nature of the data-set from OkCupid, which is essay based responses by the users, several interesting research questions can be posed that delve into the intersection of language use, self-presentation, and social dynamics in online dating.
+
+One specific research question I would want to pose would be:\
+*Does the language style and content in profile essays correlate with the gender of the user, and if so, how do these correlations manifest?*
+
+I would pose the research hypothesis as:\
+*The language style, choice of words, and topics discussed in online dating profiles significantly vary across different genders. This might be reflected in topic choices and sentiment of the essays.*
+
+This questions would aim to explore how a demographic aspect like gender influences the way people present themselves online dating contexts. Understanding these nuances can provide insights into social and cultural trends, communication styles, and even inform better design and recommendation algorithms for dating platforms. I would be the most interested in exploring how gender expectations and patriarchal roles manifest into dating platforms and how different genders present themselves on dating platforms. This question is also situated at the crossroads of language use, social norms, and online dating and offers insights into the gender-specific communication patterns and societal norms. Below I have offered a more detailed explanation of why it might be interesting to pursue this research:
+
+1.  Uncovering Gender-Specific Communication Styles:\
+    Language is a powerful medium through which gender identities are constructed and expressed. By examining the nuances of the language style, the research could reveal how different genders articulate their identities, preferences, and expectations.
+
+2.  Exploring Social and Cultural Influences:
+
+    Dating platforms are not isolated from societal influences. They often reflect and reinforce societal norms and expectations regarding gender roles. This research could shed light on how societal perceptions of gender influence self-presentation in dating contexts. The way people present themselves can provide a window into current dating trends and cultural attitude towards relationships and some abstractly related ideas such as feminism. For example: there might have been differences in expectations and norms in progressive relationships during the second wave of feminism as compared to the (current) fourth wave of feminism.
+
+3.  Implications for Online Dating Platforms:
+
+    Insights from this research could help dating platforms to refine their algorithms for better match recommendations, based on a deeper understanding of gender-specific communication and preferences.
+
+4.  Beyond Stereotypes and Generalizations:
+
+    By analyzing this real data, this research could either challenge or confirm common stereotypes about how men and women behave in the pursuit of relationships, providing a more well-rounded understanding of gender dynamics. It can also highlight the diversity within each gender, showcasing a range of styles and preferences that go beyond binary or simplistic understandings of gender.
+
+In conclusion, this research question is important because it taps into fundamental aspects of human interaction and identity in the context of a modern, digital-first social ritual. It is interesting because it promises to reveal layers of social dynamics and communication styles that are often hidden or unexplored, offering both practical insights for technology design and profound understanding of gender in contemporary society.
+
+***What techniques (supervised or unsupervised) would you use to analyze the text data? Why?***
+
+It might be difficult to work on the csv 'essays_revised_and_shuffled' to explore the research question mentioned above because the essays cannot be linked to the user's profile data to prevent the possibility of identifying individual users. This implies that while we have individual essay answers, we are unaware of whether they come from a male or the female. However, if the researchers (Kim and Escobedo-Land) work using the raw data, there are multiple insights that can come out of the data-set.
+
+Below I have outlined a few methodologies:
+
+[Unsupervised Techniques:]{.underline}
+
+1.  Topic Modelling (Latent Dirichlet Allocation - LDA)
+
+    Topic modeling is a powerful unsupervised machine learning technique used in text mining to discover abstract topics within a corpus of documents. It's particularly useful for analyzing large volumes of unstructured text data, where manually identifying themes would be impractical or impossible. The technique is rooted in the idea that documents are mixtures of topics, and topics are mixtures of words. Topic models assume that there are latent topics within a corpus which can explain the occurrence of words in documents. These topics are not observed directly but inferred from the word distributions. Each topic is characterized by a distribution of words.
+
+    It would probably be insightful to use topic modelling because it can efficiently handle large volumes of text data, help in uncovering hidden patterns and themes in text, and provide actionable insights for the research.
+
+```{r}
+#I added this code under hashes because my computer was unable to process and run the code and kept crashing and lagging. But, if I had to run topic modelling, this is how I would go about it 
+#lda_model <- LDA(dfm_essays, k = 5)
+```
+
+2.  Sentiment Analysis
+
+    Sentiment Analysis, a sub-field of natural language processing (NLP) and text analytics, aims to determine the emotional tone behind a body of text. The primary objective is to clasify the polarity of a given text in a document - whether the expressed opinion is positive, negative, or neutral. Beyond polarity, sentiment analysis can also involve detecting specific emotions, like happiness, anger, or sadness. Using this technique can help upack the nuances of self-presentation.
+
+```{r}
+sentiments <- get_sentiment(essays_df$combined_essay, method = "syuzhet")
+summary(sentiments)
+```
+
+[Supervised Techniques:]{.underline}
+
+1.  Stylistic Analysis
+
+    Stylistic analysis in the context of text data involves examining the linguistic style and patterns in how people write their essays. It looks at various linguistic features such as word choice, sentence structure, use of pronouns, adjectives, verbs, and more. It also considers aspects like formality, complexity, and the use of specific language constructs (e.g., metaphors, similes). The way people write can reflect their identity, personality, and cultural background. Analyzing stylistic elements can reveal how different genders express themselves and how this expression aligns with or diverges from societal norms or gender stereotypes. (I have provided code for how I would go about stylistic analysis below under hashes because the gender data is unavailable to us).
+
+```{r}
+# Assuming gender data is available
+#training_data <- createDataPartition(essays_df$gender, p = 0.8, list = FALSE)
+#train_df <- essays_df[training_data, ]
+#test_df <- essays_df[-training_data, ]
+#model <- train(gender ~ ., data = train_df, method = "svmRadial")
+#predictions <- predict(model, test_df)
+#confusionMatrix(predictions, test_df$gender)
+```
+
+2.  Regression Analysis:
+
+    Using regression analysis I would be able to analyze the correlation between word usage (or topics, sentiment scores) and gender. The regression models can provide insights into the strength and nature of the relationship between language elements and gender, offering statistical significance to the findings. (I have provided code for how I would go about stylistic analysis below under hashes because the gender data is unavailable to us).
+
+```{r}
+#reg_model <- lm(gender ~ ., data = dfm_essays)  # Assuming gender is coded numerically
+#summary(reg_model)
+```
